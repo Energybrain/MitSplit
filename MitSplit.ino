@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017 2 Much Sun, LLC
+ * Copyright (c) 2017 by 2 Much Sun, LLC
  * This is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 3, or (at your option)
@@ -21,7 +21,8 @@
 #include "HeatPump.h"
 #include <EEPROM.h>
 
-#define VERSION "1.0"
+#define VERSION "1.2"
+#define ESP8266
 
 // for EEPROM map
 #define EEPROM_SIZE 512
@@ -50,18 +51,19 @@
 #define MEMORY_CHECK_START 511
 #define MEMORY_CHECK_MAX_LENGTH 1
 
-#define SERVER_UPDATE_RATE 30000 //update emoncms server every 30 seconds
+#define SERVER_UPDATE_RATE 10000 //update emoncms server every 10 seconds
+#define SERVER_FAST_UPDATE_RATE 2000 //update emoncms server every 2 seconds
+
 #define RED_LED 0
 #define AMBER_LED 12
 #define LED_UPDATE_RATE 3750
 #define SLOW_BLINK_RATE 1000
 #define FAST_BLINK_RATE 500
 #define RETRY_NETWORK_PERIOD 1800000 //check network every 30 min
-
 ESP8266WebServer server(80);
-const char* ssid = "SPLIT";
-const char* password = "mit";
-const char* html = " Current Room Temp: _ROOMTEMP_\n&deg;_TEMPUNITS_<P><form action = 'change_states'>\n<table>\n"
+const char* ssid = "MitSplit";
+const char* password = "mitsplit";
+const char* html = "Current Room Temp: _ROOMTEMP_\n&deg;_TEMPUNITS_<P><form action = 'change_states'>\n<table>\n"
                    "<tr>\n<td>Power:</td>\n<td>\n_POWER_</td>\n</tr>\n"
                    "<tr>\n<td>Mode:</td>\n<td>\n_MODE_</td>\n</tr>\n"
                    "<tr>\n<td>Set Temp:</td>\n<td>\n_TEMP_</td>\n</tr>\n"
@@ -75,7 +77,7 @@ String st = "not_scanned";
 String header = "<HTLML><HEAD><META NAME='viewport' CONTENT='width=device-width, initial-scale=_SCALE_'>"
                    "_REFRESH_"
                    "<BODY><FONT SIZE=5><FONT COLOR=FF00FF> Mit</FONT><B>Split</B></FONT>"
-                   "<FONT FACE='Arial'><B> by 2 Much Sun, LLC</B><P><FONT SIZE=5>_LOCATION_</FONT></P>";
+                   "<FONT FACE='Arial'><FONT SIZE=4><B> by 2MuchSun, LLC</B><P><FONT SIZE=5>_LOCATION_</FONT></P>";  //2 Much Sun, LLC
 String esid = "";
 String epass = "";
 String privateKey = "";
@@ -102,14 +104,16 @@ unsigned long Timer;
 unsigned long Timer2;
 unsigned long Timer3;
 unsigned long Timer4;
+unsigned long reset_timer;
+unsigned long reset_timer2;
 
 bool blink_LED1 = false;
 bool blink_LED2 = false;
+bool immediate_update = false;
 
 // determines server state
 int server_down = 0;
 int server2_down = 0;
-int rate = 60;
 
 //used to display last digit of assigned IP Address using LEDs
 int timer_enabled = 0;
@@ -121,6 +125,14 @@ int ip_position;
 int total_ip;
 
 int display_Fahrenheit;
+int count = 0;
+int timer_rate = SERVER_UPDATE_RATE;
+
+String power[2] = {"OFF", "ON"};
+String mode_hp[5] = {"HEAT", "DRY", "COOL", "FAN", "AUTO"};
+String fan[6] = {"AUTO", "QUIET", "1", "2", "3", "4"};
+String vane[7] = {"AUTO", "1", "2", "3", "4", "5", "SWING"};
+String widevane[7] = {"<<", "<", "|", ">", ">>", "<>", "SWING"}; 
 
 HeatPump hp;
 
@@ -147,10 +159,8 @@ void writeEEPROM(int start_byte, int allocated_size, String contents) {
 }
 
 void resetEEPROM(int start_byte, int end_byte) {
-  //Serial.println("Erasing EEPROM");
   for (int i = start_byte; i < end_byte; ++i) {
    EEPROM.write(i, 0);
-    //Serial.print("#"); 
   }
   EEPROM.commit();   
 }
@@ -184,13 +194,10 @@ void downloadEEPROM() {
 
 void bootOTA() {
   ArduinoOTA.onStart([]() {
-    //Serial.println("Start");
   });
   ArduinoOTA.onEnd([]() {
-    //Serial.println("\nEnd");
   });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    //Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
   });
   ArduinoOTA.onError([](ota_error_t error) {
     //Serial.printf("Error[%u]: ", error);
@@ -201,18 +208,14 @@ void bootOTA() {
     else if (error == OTA_END_ERROR) Serial.println("End Failed");*/
   });
   ArduinoOTA.begin();
-  //Serial.println("Ready");
-  //Serial.print("IP address: ");
-  //Serial.println(WiFi.localIP());
 }
-
 
 void setup() {
   pinMode(RED_LED, OUTPUT);
   digitalWrite(RED_LED,HIGH);
   pinMode(AMBER_LED, OUTPUT);
   digitalWrite(AMBER_LED,HIGH);
-  //Serial.begin(115200);
+    //Serial.begin(115200);
   EEPROM.begin(512);
   char tmpStr[40];
   downloadEEPROM();
@@ -221,8 +224,6 @@ void setup() {
   WiFi.disconnect();
   delay(100);
   int n = WiFi.scanNetworks();
-  //Serial.print(n);
-  //Serial.println(" networks found");
   st = "<SELECT NAME='ssid'>";
   int found_match = 0;
   delay(1500);
@@ -231,7 +232,6 @@ void setup() {
     st += String(WiFi.SSID(i)) + "'";
     if (String(WiFi.SSID(i)) == esid.c_str()) {
       found_match = 1;
-      //Serial.println("found match");
       st += "SELECTED";
     }
     st += "> " + String(WiFi.SSID(i));
@@ -248,12 +248,8 @@ void setup() {
         st += "<OPTION VALUE='not chosen'SELECTED> Choose One </OPTION>";
     }
   st += "</SELECT>";
-  delay(100);
-     
+  delay(100);     
   if ( esid != 0 ) { 
-    //Serial.println(" ");
-    //Serial.print("Connecting as Wifi Client to: ");
-    //Serial.println(esid);
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     WiFi.begin(esid.c_str(), epass.c_str());
@@ -261,26 +257,19 @@ void setup() {
     int t = 0;
     int attempt = 0;
     while (WiFi.status() != WL_CONNECTED) {
-      //Serial.print("#");
       delay(500);
       t++;
       if (t >= 20) {
-        //Serial.println(" ");
-        //Serial.println("Trying Again...");
         delay(2000);
         WiFi.disconnect();
         WiFi.begin(esid.c_str(), epass.c_str());
         t = 0;
         attempt++;
         if (attempt >= 10) {
-          //Serial.println();
-          //Serial.print("Configuring access point...");
           WiFi.mode(WIFI_STA);
           WiFi.disconnect();
           delay(100);
           int n = WiFi.scanNetworks();
-          //Serial.print(n);
-          //Serial.println(" networks found");
           delay(1000);
           st = "<SELECT NAME='ssid'><OPTION VALUE='not chosen'SELECTED> Try again </OPTION>";
           esid = ""; // clears out esid in case only the password is incorrect-used only to display the right instructions to user
@@ -293,16 +282,6 @@ void setup() {
           delay(100);
           WiFi.softAP(ssid, password);
           IPAddress myIP = WiFi.softAPIP();
-          //Serial.print("AP IP address: ");
-          //Serial.println(myIP);
-          //Serial.println("$FP 0 0 SSID...SPLIT.");
-          delay(100);
-          //Serial.println("$FP 0 1 PASS...mitsubishi.");
-          delay(100);
-          //Serial.println("$FP 0 0 IP_Address......");
-          delay(100);
-          sprintf(tmpStr,"$FP 0 1 %d.%d.%d.%d",myIP[0],myIP[1],myIP[2],myIP[3]);
-          //Serial.println(tmpStr);
           wifi_mode = 1;
           break;
         }
@@ -310,21 +289,9 @@ void setup() {
     }
   }
   else {
-    //Serial.println();
-    //Serial.print("Configuring access point...");
     delay(100);
     WiFi.softAP(ssid, password);
     IPAddress myIP = WiFi.softAPIP();    
-    //Serial.print("AP IP address: ");
-    //Serial.println(myIP);
-    //Serial.println("$FP 0 0 SSID...SPLIT.");
-    delay(100);
-    //bSerial.println("$FP 0 1 PASS...mitsubishi.");
-    delay(100);
-    //bSerial.println("$FP 0 0 IP_Address......");
-    delay(100);
-    sprintf(tmpStr,"$FP 0 1 %d.%d.%d.%d",myIP[0],myIP[1],myIP[2],myIP[3]);
-    //bSerial.println(tmpStr);     
     wifi_mode = 2; //AP mode with no SSID in EEPROM
   }
   
@@ -333,14 +300,14 @@ void setup() {
   }
   delay(100);
   hp.connect(&Serial);
-  hp.setSettings({ //set some default settings
-    "ON",  /* ON/OFF */
-    "FAN", /* HEAT/COOL/FAN/DRY/AUTO */
-    26,    /* Between 16 and 31 */
-    "4",   /* Fan speed: 1-4, AUTO, or QUIET */
-    "3",   /* Air direction (vertical): 1-5, SWING, or AUTO */
-    "|"    /* Air direction (horizontal): <<, <, |, >, >>, <>, or SWING */
-  });
+  //hp.setSettings({ //set some default settings
+  /*    "OFF",  /* ON/OFF */
+  /*    "HEAT", /* HEAT/COOL/FAN/DRY/AUTO */
+  /*     25,    /* Between 16 and 31 */
+  /*    "AUTO",   /* Fan speed: 1-4, AUTO, or QUIET */
+  /*    "4",   /* Air direction (vertical): 1-5, SWING, or AUTO */
+  /*    "|"    /* Air direction (horizontal): <<, <, |, >, >>, <>, or SWING */
+  //});
   delay(100);
   server.on("/a", handleCfg);
   server.on("/confirm", handleCfm);
@@ -349,6 +316,7 @@ void setup() {
   server.on("/change_states", handle_change_states);
   server.on("/settings", handleSettings);
   server.on("/r", handleRapiR);
+  server.on("/reset", handleRst);
   server.begin(); 
   delay(100);
   bootOTA();
@@ -359,11 +327,7 @@ void setup() {
 }
 
 void get_ip_address_for_LED(){
-  //Serial.println(" ");
-  //Serial.println("Connected as a Client");
   IPAddress myAddress = WiFi.localIP();
-  //Serial.println(myAddress);
-  //Serial.println("$FP 0 0 Client-IP.......");
   delay(100);
   if (myAddress[3] <= 9){
     first_ip_digit = 0;
@@ -385,8 +349,6 @@ void get_ip_address_for_LED(){
   }
   total_ip = first_ip_digit + second_ip_digit + third_ip_digit + digits;
   ip_position = 1;
-  //sprintf(tmpStr,"$FP 0 1 %d.%d.%d.%d",myAddress[0],myAddress[1],myAddress[2],myAddress[3]);
-  //Serial.println(tmpStr);
 }
 
 void updateRedLED(){
@@ -443,7 +405,6 @@ void updateYellowLED(){
       blink_LED1 = false;
       blink_LED2 = false;
       ip_position = 1;
-      //Serial.println("wl not connected");
       return;
     }
     if (ip_position <= 2){   
@@ -500,7 +461,6 @@ void checkReset(){
         resetEEPROM(0, SSID_MAX_LENGTH + PASS_MAX_LENGTH); // only want to erase ssid and password
         int erase = 0;
         WiFi.disconnect();
-        //Serial.print("Finished...");
         delay(2000);
         ESP.reset();
       } 
@@ -513,39 +473,29 @@ void checkReset(){
 void retryNetworkConnection() {
   // Remain in AP for 30 min before trying again if SSID was saved
   if ((millis() - Timer2) >= RETRY_NETWORK_PERIOD){
-    //Serial.println(" ");
-    //Serial.print("reconnect timer is up ");
     Timer2 = millis(); 
     if (wifi_mode == 1){
       esid = readEEPROM(SSID_START, SSID_MAX_LENGTH);
-      if (esid != 0){
-        //Serial.println(" ");
-        //Serial.print("Reconnecting as Wifi Client to: ");
-        //Serial.println(esid);     
+      if (esid != 0){ 
         WiFi.mode(WIFI_STA);
         WiFi.disconnect();
         delay(100);
         WiFi.begin(esid.c_str(), epass.c_str());
         delay(500);
         int t = 0;
-        while ((WiFi.status() != WL_CONNECTED) && (t <= 19)) { 
-          //Serial.println(" ");
-          //Serial.println("Waiting...");   
+        while ((WiFi.status() != WL_CONNECTED) && (t <= 19)) {   
           delay(500);
           t++;
         }
         if (WiFi.status() == WL_CONNECTED){
           wifi_mode = 0;
           int n = WiFi.scanNetworks();
-          //Serial.print(n);
-          //Serial.println(" networks found");
           st = "<SELECT NAME='ssid'>";
           delay(1500);
           for (int i = 0; i < n; ++i) {
             st += "<OPTION VALUE='";
             st += String(WiFi.SSID(i)) + "'";
             if (String(WiFi.SSID(i)) == esid.c_str()) {
-              //Serial.println("found match");
               st += "SELECTED";
             }
             st += "> " + String(WiFi.SSID(i));
@@ -566,60 +516,114 @@ void retryNetworkConnection() {
 }
 
 void loop() {
-  long reset_timer;
-  long reset_timer2;
   ArduinoOTA.handle();        // initiates OTA update capability
-  delay(250);                 // delay needed to prevent IP address loss
   server.handleClient();
   updateRedLED();
   updateYellowLED();
   checkReset();
   retryNetworkConnection();
-  delay(250);                 // delay is needed to prevent IP address loss
   hp.sync();
   if (wifi_mode == 0 && privateKey != 0) { 
-    if ((millis() - Timer) >= SERVER_UPDATE_RATE) {
+    if (((millis() - Timer) >= timer_rate)) {
       // We now create a URL for data upload request
       String url;
       String url2;
       String tmp;
       String mode_num;
+      String url_rtemp;
+      String url_set_temp;
+      String url_power;
+      String url_mode;
+      String url_fan;
+      String fan_num;
+      String url_vane;
+      String vane_num;
+      String url_wide_vane;
+      String wide_vane_num;
+      if (immediate_update){
+        count += 1;
+        if (count > 9){          
+          timer_rate = SERVER_UPDATE_RATE;
+          immediate_update = false;
+          count = 0;
+        }
+      }
       if (hp.getModeSetting() == "HEAT")
         mode_num = "0";
       if (hp.getModeSetting() == "DRY")
-        mode_num = 1;
+        mode_num = "1";
       if (hp.getModeSetting() == "COOL")
-        mode_num = 2;
+        mode_num = "2";
       if (hp.getModeSetting() == "FAN")
-        mode_num = 3;
+        mode_num = "3";
       if (hp.getModeSetting() == "AUTO")
-        mode_num = 4;
-      String url_rtemp = inputID_RM_TEMP;
+        mode_num = "4";
+      if (hp.getFanSpeed() == "AUTO")
+        fan_num = "0";
+      if (hp.getFanSpeed() == "QUIET")
+        fan_num = "1";
+      if (hp.getFanSpeed() == "1")
+        fan_num = "2";
+      if (hp.getFanSpeed() == "2")
+        fan_num = "3";
+      if (hp.getFanSpeed() == "3")
+        fan_num = "4";
+      if (hp.getFanSpeed() == "4")
+        fan_num = "5";
+      if (hp.getVaneSetting() == "AUTO")
+        vane_num = "0";
+      if (hp.getVaneSetting() == "1")
+        vane_num = "1";
+      if (hp.getVaneSetting() == "2")
+        vane_num = "2";
+      if (hp.getVaneSetting() == "3")
+        vane_num = "3";
+      if (hp.getVaneSetting() == "4")
+        vane_num = "4";
+      if (hp.getVaneSetting() == "5")
+        vane_num = "5";
+      if (hp.getVaneSetting() == "SWING")
+        vane_num = "6";
+       if (hp.getWideVaneSetting() == "<<")
+        wide_vane_num = "0";
+      if (hp.getWideVaneSetting() == "<")
+        wide_vane_num = "1";
+      if (hp.getWideVaneSetting() == "|")
+        wide_vane_num = "2";
+      if (hp.getWideVaneSetting() == ">")
+        wide_vane_num = "3";
+      if (hp.getWideVaneSetting() == ">>")
+        wide_vane_num = "4";
+      if (hp.getWideVaneSetting() == "<>")
+        wide_vane_num = "5";
+      if (hp.getWideVaneSetting() == "AUTO")
+        wide_vane_num = "6";
+      url_rtemp = inputID_RM_TEMP;
       if (display_Fahrenheit)
-        url_rtemp += String(hp.getRoomTemperature()*1.8 + 32,1);
+       url_rtemp += String(hp.getRoomTemperature()*1.8 + 32,1);
       else
         url_rtemp += hp.getRoomTemperature();
       url_rtemp += ",";
-      String url_power = inputID_POWER;
+      url_power = inputID_POWER;
       url_power += hp.getPowerSettingBool();
       url_power += ",";
-      String url_mode = inputID_MODE;
+      url_mode = inputID_MODE;
       url_mode += mode_num;
       url_mode += ",";
-      String url_set_temp = inputID_SET_TEMP;
+      url_set_temp = inputID_SET_TEMP;
       if (display_Fahrenheit)
         url_set_temp += String(hp.getTemperature()*1.8 + 32,1);
       else
         url_set_temp += hp.getTemperature();
       url_set_temp += ","; 
-      String url_fan = inputID_FAN;
-      url_fan += hp.getFanSpeed();
+      url_fan = inputID_FAN;
+      url_fan += fan_num;
       url_fan += ","; 
-      String url_vane = inputID_VANE;
-      url_vane += hp.getVaneSetting();
+      url_vane = inputID_VANE;
+      url_vane += vane_num;
       url_vane += ",";
-      String url_wide_vane = inputID_WIDE_VANE;
-      url_wide_vane += hp.getWideVaneSetting();
+      url_wide_vane = inputID_WIDE_VANE;
+      url_wide_vane += wide_vane_num;
       url_wide_vane += ",";
       String url_display_Fahrenheit = inputID_DISPLAY_FAHREN;
       url_display_Fahrenheit += display_Fahrenheit;
@@ -641,7 +645,6 @@ void loop() {
       url2 += tmp;
       url += privateKey.c_str();    //needs to be constant character to filter out control characters padding when read from memory
       url2 += privateKey2.c_str();  //needs to be constant character to filter out control characters padding when read from memory
-    
       // Use WiFiClient class to create TCP connections
       WiFiClient client;
       const int httpPort = 80;  
@@ -676,12 +679,12 @@ void loop() {
           }
         }
       }
-      //Serial.println(host);
-      //Serial.println(url);
       Timer = millis();
     }
   }
 }
+
+
 
 void handleCfg() {
   String s;
@@ -698,7 +701,7 @@ void handleCfg() {
   String qdirectory = server.arg("dir");
   String qdirectory2 = server.arg("dir2");
   String qlocation = server.arg("loc");
-  String qFahren = server.arg("Fahr");  
+  String qFahren = server.arg("Fahr");
 
   writeEEPROM(PASS_START, PASS_MAX_LENGTH, qpass);
   writeEEPROM(MEMORY_CHECK_START, MEMORY_CHECK_MAX_LENGTH, "B");  //use to indicate if memory is ready
@@ -741,11 +744,11 @@ void handleCfg() {
       display_Fahrenheit = qFahren.toInt();
     }
   }
-   String tmp = header;
-   tmp.replace("_LOCATION_",location_name);
-   tmp.replace("_REFRESH_","");
-   tmp.replace("_SCALE_","0.6");
-   s = tmp;
+  String tmp = header;
+  tmp.replace("_LOCATION_",location_name);
+  tmp.replace("_REFRESH_","");
+  tmp.replace("_SCALE_","0.6");
+  s = tmp;
   if (qsid != "not chosen") {
     writeEEPROM(SSID_START, SSID_MAX_LENGTH, qsid);
     s += "<P><FONT SIZE=4>Updating Settings...</P>";
@@ -757,11 +760,11 @@ void handleCfg() {
       s += "<P>in order to re-access the Setup page.</P>";
       s += "<P>---------------------</P>";
       s += "<P>If unsuccessful after 90 seconds, the  MitSplit will go back to the";
-      s += "<P>default access point at SSID:SPLIT.</P>";
+      s += "<P>default access point at SSID:MitSplit.</P>";
       s += "</FONT></HTML>\r\n\r\n";
       server.send(200, "text/html", s);
       WiFi.disconnect();
-      delay(2000);
+      delay(2000);  
       ESP.reset();  
     }
     else {
@@ -781,17 +784,27 @@ void handleCfg() {
 }
 
 void handleSettings() {
+  IPAddress myAddress = WiFi.localIP();
+  char tmpStr[20];
   String s;
   String sTmp;
   String tmp = header;
-  //Serial.println("inside settings");
   tmp.replace("_LOCATION_",location_name + " Setup");
   tmp.replace("_REFRESH_","");
   tmp.replace("_SCALE_","0.8");
   s = tmp;
   s += "<P><FONT SIZE=2>WiFi FW v";
   s += VERSION;
-  s += "</FONT></P><FONT SIZE=4>";
+  s += "</P>";
+  if (wifi_mode == 0 ){
+    sprintf(tmpStr,"%d.%d.%d.%d",myAddress[0],myAddress[1],myAddress[2],myAddress[3]);
+    sTmp = String(tmpStr);
+  }
+  else
+    sTmp = "192.168.4.1";
+  s += "<P>Connected at ";
+  s += tmpStr;
+  s += "</FONT></P>";
   s += "<P>====================</P>";
   s += "<P><B>NETWORK CONNECT</B></P>";
   s += "<FORM ACTION='rescan'>";  
@@ -930,7 +943,7 @@ void handleSettings() {
   s += "</TR></TABLE>";
   s += "<FORM ACTION='confirm'>";  
   s += "<P>&nbsp;<INPUT TYPE=submit VALUE='Erase Settings'></P>";
-  s += "</FORM></FONT></P>";
+  s += "</FORM></FONT>";
   s += "</HTML>\r\n\r\n";
   server.send(200, "text/html", s);
 }
@@ -952,6 +965,25 @@ void handleRescan() {
   server.send(200, "text/html", s);
   WiFi.disconnect();
   delay(2000);  
+  ESP.reset();
+}
+
+void handleRst() {
+  String s;
+  String tmp = header;
+  tmp.replace("_LOCATION_",location_name + " Reset to Default");
+  tmp.replace("_REFRESH_","");
+  tmp.replace("_SCALE_","0.6");
+  s = tmp;
+  s += "<P>Clearing the EEPROM...</P>";
+  s += "<P>The MitSplit will reset and have an IP address of 192.168.4.1</P>";
+  s += "<P>After about 30 seconds, the MitSplit will activate the access point</P>";
+  s += "<P>SSID:MitSplit and password:mitsplit</P>";
+  s += "</FONT></FONT></HTML>\r\n\r\n";
+  resetEEPROM(0, EEPROM_SIZE);
+  server.send(200, "text/html", s);
+  WiFi.disconnect();
+  delay(1000);
   ESP.reset();
 }
 
@@ -1006,13 +1038,11 @@ void handleRapiR() {
   String argument = String((int)rapi[1] - 65);
   switch (rapi[0]){
     case 'P':
-      hp.setPowerSetting(argument.toInt());
+      argument = power[argument.toInt()];
+      hp.setPowerSetting(argument);
       break;
     case 'M':
-      if (argument == "0")
-        argument = "HEAT";
-      else if (argument == "2")
-        argument = "COOL";
+      argument = mode_hp[argument.toInt()];
       hp.setModeSetting(argument);
       break;
     case 'T':
@@ -1020,50 +1050,52 @@ void handleRapiR() {
       hp.setTemperature(ctemp);
       break;
     case 'F':
+      argument = fan[argument.toInt()];
       hp.setFanSpeed(argument);
       break;
     case 'V':
+      argument = vane[argument.toInt()];
       hp.setVaneSetting(argument);
       break;
     case 'W':
+      argument = widevane[argument.toInt()];
       hp.setWideVaneSetting(argument);
       break;
     default:
       break;
     }
-    hp.update(); 
-    delay(1000);
-    Timer = millis() - SERVER_UPDATE_RATE;
-    String tmp = header;
-    tmp.replace("_LOCATION_",location_name + " RAPI");
-    tmp.replace("_REFRESH_","");
-    tmp.replace("_SCALE_","1");
-    s = tmp;
-    s += "<P>Commands Set</P>";
-    s += "<P>Power (OFF - ON) - P(A - B)</P>";
-    s += "<P>Set Fan Speed (0 - 6) - F(A - G)</P>";
-    s += "<P>Set Mode (0 - 3) - M(A - D)</P>";
-    s += "<P>Set Temperature (16 - 31) - T(A - P)</P>";
-    s += "<P>Set Vane (0 - 6) - V(A - G)</P>";
-    s += "<P>Set Wide Vane (0 - 6) - W(A - G)</P>";
-    s += "<P>";
-    s += "<P><FORM METHOD='get' ACTION='r'><LABEL><B><I>RAPI Command:</B></I></LABEL><INPUT NAME='rapi' MAXLENGTH='32'></P>";
-    s += "<P>&nbsp;<TABLE><TR>";
-    s += "<TD><INPUT TYPE=SUBMIT VALUE='    Submit    '></TD>";
-    s += "</FORM><FORM ACTION='.'>";
-    s += "<TD><INPUT TYPE=SUBMIT VALUE='    Home   '></TD>";
-    s += "</FORM>";
-    s += "</TR></TABLE></P>";
-    s += rapi;
-    s += "<P>";
-    s += "</P></FONT></HTML>\r\n\r\n";
-    server.send(200, "text/html", s);
+  hp.update();
+  Timer = millis();
+  immediate_update = true;
+  timer_rate = SERVER_FAST_UPDATE_RATE;
+  String tmp = header;
+  tmp.replace("_LOCATION_",location_name + " RAPI");
+  tmp.replace("_REFRESH_","");
+  tmp.replace("_SCALE_","1");
+  s = tmp;
+  s += "<P>Commands Set</P>";
+  s += "<P>Power (OFF - ON) - P(A - B)</P>";
+  s += "<P>Set Fan Speed (0 - 6) - F(A - G)</P>";
+  s += "<P>Set Mode (0 - 3) - M(A - D)</P>";
+  s += "<P>Set Temperature (16 - 31) - T(A - P)</P>";
+  s += "<P>Set Vane (0 - 6) - V(A - G)</P>";
+  s += "<P>Set Wide Vane (0 - 6) - W(A - G)</P>";
+  s += "<P>";
+  s += "<P><FORM METHOD='get' ACTION='r'><LABEL><B><I>RAPI Command:</B></I></LABEL><INPUT NAME='rapi' MAXLENGTH='32'></P>";
+  s += "<P>&nbsp;<TABLE><TR>";
+  s += "<TD><INPUT TYPE=SUBMIT VALUE='    Submit    '></TD>";
+  s += "</FORM><FORM ACTION='.'>";
+  s += "<TD><INPUT TYPE=SUBMIT VALUE='    Home   '></TD>";   s += "</FORM>";
+  s += "</TR></TABLE></P>";
+  s += rapi;
+  s += "<P>";
+  s += "</P></FONT></HTML>\r\n\r\n";
+  server.send(200, "text/html", s);
 }
 
 void handle_root() {
-  String room_temp;
+  String rtemp;
   String toSend = header + html;
-  //Serial.println("inside root");
   toSend.replace("_REFRESH_", "<META HTTP-EQUIV='refresh' CONTENT='30; URL=/'>");
   toSend.replace("_SCALE_","1");
   toSend.replace("_LOCATION_", location_name + " Home Page");
@@ -1071,10 +1103,7 @@ void handle_root() {
     toSend.replace("_TEMPUNITS_", "F");
   else
     toSend.replace("_TEMPUNITS_", "C");
-  //toSend.replace("_RATE_", String(rate));
-  String power[2] = {"OFF", "ON"}; 
   toSend.replace("_POWER_", createOptionSelector("POWER", power, 2, hp.getPowerSetting()));
-  String mode_hp[5] = {"HEAT", "DRY", "COOL", "FAN", "AUTO"};
   toSend.replace("_MODE_", createOptionSelector("MODE", mode_hp, 5, hp.getModeSetting()));
   if (display_Fahrenheit){
     String temp[16] = {"87.8", "86.0", "84.2", "82.4", "80.6", "78.8", "77.0", "75.2", "73.4", "71.6", "69.8", "68.0", "66.2", "64.4", "62.6", "60.8"};
@@ -1084,54 +1113,29 @@ void handle_root() {
     String temp[16] = {"31", "30", "29", "28", "27", "26", "25", "24", "23", "22", "21", "20", "19", "18", "17", "16"};
     toSend.replace("_TEMP_", createOptionSelector("TEMP", temp, 16, String(hp.getTemperature())));
   }
-  String fan[6] = {"AUTO", "QUIET", "1", "2", "3", "4"};
   toSend.replace("_FAN_", createOptionSelector("FAN", fan, 6, hp.getFanSpeed()));
-  String vane[7] = {"AUTO", "1", "2", "3", "4", "5", "SWING"};
   toSend.replace("_VANE_", createOptionSelector("VANE", vane, 7, hp.getVaneSetting()));
-  String widevane[7] = {"<<", "<", "|", ">", ">>", "<>", "SWING"}; 
   toSend.replace("_WVANE_", createOptionSelector("WIDEVANE", widevane, 7, hp.getWideVaneSetting()));
   if (display_Fahrenheit)
-    room_temp = String((1.8*hp.getRoomTemperature() + 32),1);
+    rtemp = String((1.8*hp.getRoomTemperature() + 32),1);
   else
-    room_temp = String(hp.getRoomTemperature(),1);
-  toSend.replace("_ROOMTEMP_", room_temp);
+    rtemp = String(hp.getRoomTemperature(),1);
+  toSend.replace("_ROOMTEMP_", rtemp);
   server.send(200, "text/html", toSend);
-  delay(100);
-  //Serial.println("finish root");
 }
 
 void handle_change_states() {
-  bool updated = false;
   String s;
-    if (server.hasArg("POWER")) {
-      hp.setPowerSetting(server.arg("POWER"));
-      updated = true;
-    }
-    if (server.hasArg("MODE")) {
-      hp.setModeSetting(server.arg("MODE"));
-      updated = true;
-    }
-    if (server.hasArg("TEMP")) {
-      if (display_Fahrenheit)
-        hp.setTemperature((server.arg("TEMP").toFloat()-32)/1.8);
-      else
-        hp.setTemperature(server.arg("TEMP").toInt());
-      updated = true;
-    }
-    if (server.hasArg("FAN")) {
-      hp.setFanSpeed(server.arg("FAN"));
-      updated = true;
-    }
-    if (server.hasArg("VANE")) {
-      hp.setVaneSetting(server.arg("VANE"));
-      updated = true;
-    }
-    if (server.hasArg("WIDEVANE")) {
-      hp.setWideVaneSetting(server.arg("WIDEVANE"));
-      updated = true;
-    }
+  hp.setPowerSetting(server.arg("POWER"));
+  hp.setModeSetting(server.arg("MODE"));
+  if (display_Fahrenheit)
+     hp.setTemperature((server.arg("TEMP").toFloat()-32)/1.8);
+  else
+     hp.setTemperature(server.arg("TEMP").toInt());
+  hp.setFanSpeed(server.arg("FAN"));
+  hp.setVaneSetting(server.arg("VANE"));
+  hp.setWideVaneSetting(server.arg("WIDEVANE"));
   hp.update();
-  delay(500);   // delay is needed to prevent IP address loss
   s += "<HTML><head><meta name='viewport' content='width=device-width, initial-scale=1.5'><meta http-equiv='refresh' content='3; url=/'/><FORM ACTION='/'>"; 
   s += "<P><FONT SIZE=4><FONT FACE='Arial'>Success!</P>";
   s += "<P><INPUT TYPE=submit VALUE='     OK     '></FONT></P>";
@@ -1140,3 +1144,4 @@ void handle_change_states() {
   s += "\r\n\r\n";
   server.send(200, "text/html", s);
 }
+

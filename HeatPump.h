@@ -9,7 +9,7 @@
 
   This library is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FIaaTNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
   Lesser General Public License for more details.
 
   You should have received a copy of the GNU Lesser General Public
@@ -34,11 +34,13 @@
  */
 #ifdef ESP8266
 #include <functional>
+#define ON_CONNECT_CALLBACK_SIGNATURE std::function<void()> onConnectCallback
 #define SETTINGS_CHANGED_CALLBACK_SIGNATURE std::function<void()> settingsChangedCallback
 #define STATUS_CHANGED_CALLBACK_SIGNATURE std::function<void(heatpumpStatus newStatus)> statusChangedCallback
 #define PACKET_CALLBACK_SIGNATURE std::function<void(byte* packet, unsigned int length, char* packetDirection)> packetCallback
 #define ROOM_TEMP_CHANGED_CALLBACK_SIGNATURE std::function<void(float currentRoomTemperature)> roomTempChangedCallback
 #else
+#define ON_CONNECT_CALLBACK_SIGNATURE void (*onConnectCallback)()
 #define SETTINGS_CHANGED_CALLBACK_SIGNATURE void (*settingsChangedCallback)()
 #define STATUS_CHANGED_CALLBACK_SIGNATURE void (*statusChangedCallback)(heatpumpStatus newStatus)
 #define PACKET_CALLBACK_SIGNATURE void (*packetCallback)(byte* packet, unsigned int length, char* packetDirection)
@@ -82,7 +84,8 @@ class HeatPump
 {
   private:
     static const int PACKET_LEN = 22;
-    static const int PACKET_SENT_INTERVAL_MS = 1000;
+    static const int PACKET_SENT_INTERVAL_MS = 100; //was 1000 bhc 
+    static const int PACKET_INFO_INTERVAL_MS = 50; //was 2000 bhc
     static const int PACKET_TYPE_DEFAULT = 99;
 
     static const int CONNECT_LEN = 8;
@@ -146,18 +149,19 @@ class HeatPump
     unsigned long lastSend;
     int infoMode;
     unsigned long lastRecv;
-    bool connected = false;
+
     bool autoUpdate;
     bool firstRun;
     bool tempMode;
     bool externalUpdate;
+    bool connected = false;
 
     String lookupByteMapValue(const String valuesMap[], const byte byteMap[], int len, byte byteValue);
     int    lookupByteMapValue(const int valuesMap[], const byte byteMap[], int len, byte byteValue);
     int    lookupByteMapIndex(const String valuesMap[], int len, String lookupValue);
     int    lookupByteMapIndex(const int valuesMap[], int len, int lookupValue);
 
-    bool canSend();
+    bool canSend(bool isInfo);
     byte checkSum(byte bytes[], int len);
     void createPacket(byte *packet, heatpumpSettings settings);
     void createInfoPacket(byte *packet, byte packetType);
@@ -165,6 +169,7 @@ class HeatPump
     void writePacket(byte *packet, int length);
 
     // callbacks
+    ON_CONNECT_CALLBACK_SIGNATURE;
     SETTINGS_CHANGED_CALLBACK_SIGNATURE;
     STATUS_CHANGED_CALLBACK_SIGNATURE;
     PACKET_CALLBACK_SIGNATURE;
@@ -196,7 +201,7 @@ class HeatPump
     void setPowerSetting(String setting);
     String getModeSetting();
     void setModeSetting(String setting);
-    int getTemperature();
+    float getTemperature();
     void setTemperature(float setting);
     void setRemoteTemperature(float setting);
     String getFanSpeed();
@@ -213,10 +218,11 @@ class HeatPump
     bool getOperating();
 
     // helpers
-    unsigned int FahrenheitToCelsius(unsigned int tempF);
-    unsigned int CelsiusToFahrenheit(unsigned int tempC);
+    float FahrenheitToCelsius(int tempF);
+    int CelsiusToFahrenheit(float tempC);
 
     // callbacks
+    void setOnConnectCallback(ON_CONNECT_CALLBACK_SIGNATURE);
     void setSettingsChangedCallback(SETTINGS_CHANGED_CALLBACK_SIGNATURE);
     void setStatusChangedCallback(STATUS_CHANGED_CALLBACK_SIGNATURE);
     void setPacketCallback(PACKET_CALLBACK_SIGNATURE);
